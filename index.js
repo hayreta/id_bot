@@ -1,14 +1,21 @@
 require('dotenv').config();
 const { Telegraf, Markup } = require('telegraf');
 const fs = require('fs');
+const path = require('path');
+const ffmpegPath = require('@ffmpeg-installer/ffmpeg').path;
+const ffmpeg = require('fluent-ffmpeg');
+ffmpeg.setFfmpegPath(ffmpegPath);
 
 const bot = new Telegraf(process.env.BOT_TOKEN);
 const ADMIN_ID = parseInt(process.env.ADMIN_ID);
 const DB_FILE = './database.json';
+const DOWNLOADS_DIR = './downloads';
 
-// --- Database Logic ---
-if (!fs.existsSync(DB_FILE)) fs.writeFileSync(DB_FILE, JSON.stringify({ users: [], startTime: Date.now() }));
-let db = JSON.parse(fs.readFileSync(DB_FILE));
+// Ensure directories exist
+if (!fs.existsSync(DB_FILE)) fs.writeFileSync(DB_FILE, JSON.stringify({ users: [] }));
+if (!fs.existsSync(DOWNLOADS_DIR)) fs.mkdirSync(DOWNLOADS_DIR);
+
+const db = JSON.parse(fs.readFileSync(DB_FILE));
 
 function saveUser(id) {
     if (!db.users.includes(id)) {
@@ -17,157 +24,107 @@ function saveUser(id) {
     }
 }
 
-// Track user activity - FIXED with global catch
 bot.use(async (ctx, next) => {
     try {
         if (ctx.from) saveUser(ctx.from.id);
         await next();
-    } catch (err) {
-        console.error("Caught error:", err.message);
-    }
+    } catch (err) { console.error("Bot Error:", err.message); }
 });
 
-// --- Helper: Format Uptime ---
-function getUptime() {
-    const seconds = Math.floor(process.uptime());
-    const h = Math.floor(seconds / 3600);
-    const m = Math.floor((seconds % 3600) / 60);
-    const s = seconds % 60;
-    return `${h}h ${m}m ${s}s`;
+// --- Helper: Conversion Logic ---
+async function convertVideoToAudio(inputPath, outputPath) {
+    return new Promise((resolve, reject) => {
+        ffmpeg(inputPath)
+            .toFormat('mp3')
+            .on('end', () => resolve())
+            .on('error', (err) => reject(err))
+            .save(outputPath);
+    });
 }
 
 // --- Welcome Message ---
 bot.start((ctx) => {
-    const welcomeMsg = 
-        `👋 <b>Welcome to ID Bot!</b>\n\n` +
-        `🔹 Use this bot to get IDs in any of these ways:\n` +
-        `✅ Forward a message\n` +
-        `✅ Share a chat using the button\n` +
-        `✅ Share a contact\n\n` +
-        `Your Id: <code>${ctx.from.id}</code>`;
-
-    let buttons = [
-        [Markup.button.userRequest('👤 User', 1), Markup.button.botRequest('🤖 Bot', 2)],
-        [Markup.button.groupRequest('📢 Group', 3), Markup.button.channelRequest('📺 Channel', 4)],
-        ['🔍 Check by ID']
-    ];
-    if (ctx.from.id === ADMIN_ID) buttons.push(['⚙️ Admin Panel']);
-
-    ctx.reply(welcomeMsg, { parse_mode: 'HTML', ...Markup.keyboard(buttons).resize() }).catch(e => console.log(e.message));
+    ctx.reply(
+        `🎬 <b>Video to Audio Converter</b>\n\n` +
+        `Send me any <b>Video</b> and I will extract the audio for you as an MP3 file.\n\n` +
+        `Your ID: <code>${ctx.from.id}</code>`,
+        { 
+            parse_mode: 'HTML',
+            ...Markup.keyboard([
+                ['👤 My ID', '🔍 Check by ID'],
+                (ctx.from.id === ADMIN_ID ? ['⚙️ Admin Panel'] : [])
+            ]).resize()
+        }
+    ).catch(() => {});
 });
 
-// --- Admin Panel Main ---
-bot.hears('⚙️ Admin Panel', (ctx) => {
-    if (ctx.from.id !== ADMIN_ID) return;
-
-    const totalUsers = db.users.length;
-    const usedMem = (process.memoryUsage().heapUsed / 1024 / 1024).toFixed(2);
+// --- Video Processing ---
+bot.on(['video', 'document'], async (ctx) => {
+    const file = ctx.message.video || (ctx.message.document && ctx.message.document.mime_type.includes('video') ? ctx.message.document : null);
     
-    const adminMsg = 
-        `🛠 <b>Advanced Admin Dashboard</b>\n\n` +
-        `📊 <b>User Statistics</b>\n` +
-        `├ Total Users: <code>${totalUsers}</code>\n` +
-        `└ Status: 🟢 Online\n\n` +
-        `🖥 <b>Server Status</b>\n` +
-        `├ Uptime: <code>${getUptime()}</code>\n` +
-        `└ RAM Usage: <code>${usedMem} MB</code>`;
+    if (!file) return;
 
-    const adminButtons = Markup.inlineKeyboard([
-        [Markup.button.callback('📢 Broadcast', 'start_broadcast'), Markup.button.callback('📊 Export DB', 'export_db')],
-        [Markup.button.callback('🔄 Refresh Stats', 'refresh_admin'), Markup.button.callback('🗑 Clear DB', 'confirm_clear')]
-    ]);
-
-    ctx.reply(adminMsg, { parse_mode: 'HTML', ...adminButtons }).catch(e => console.log(e.message));
-});
-
-// --- Admin Actions ---
-bot.action('refresh_admin', async (ctx) => {
-    const totalUsers = db.users.length;
-    const usedMem = (process.memoryUsage().heapUsed / 1024 / 1024).toFixed(2);
-    const adminMsg = `🛠 <b>Advanced Admin Dashboard</b>\n\n📊 <b>User Statistics</b>\n├ Total Users: <code>${totalUsers}</code>\n└ Status: 🟢 Online\n\n🖥 <b>Server Status</b>\n├ Uptime: <code>${getUptime()}</code>\n└ RAM Usage: <code>${usedMem} MB</code>`;
+    const statusMsg = await ctx.reply("⏳ <i>Downloading video...</i>", { parse_mode: 'HTML' });
 
     try {
-        await ctx.editMessageText(adminMsg, { 
-            parse_mode: 'HTML', 
-            ...Markup.inlineKeyboard([
-                [Markup.button.callback('📢 Broadcast', 'start_broadcast'), Markup.button.callback('📊 Export DB', 'export_db')],
-                [Markup.button.callback('🔄 Refresh Stats', 'refresh_admin'), Markup.button.callback('🗑 Clear DB', 'confirm_clear')]
-            ])
-        });
-    } catch (e) { 
-        ctx.answerCbQuery("Stats Updated!").catch(() => {}); 
+        const fileLink = await ctx.telegram.getFileLink(file.file_id);
+        const inputPath = path.join(DOWNLOADS_DIR, `${file.file_id}.mp4`);
+        const outputPath = path.join(DOWNLOADS_DIR, `${file.file_id}.mp3`);
+
+        // Download file
+        const response = await fetch(fileLink);
+        const buffer = await response.arrayBuffer();
+        fs.writeFileSync(inputPath, Buffer.from(buffer));
+
+        await ctx.telegram.editMessageText(ctx.chat.id, statusMsg.message_id, null, "⚙️ <i>Converting to MP3...</i>", { parse_mode: 'HTML' });
+
+        // Convert
+        await convertVideoToAudio(inputPath, outputPath);
+
+        // Send Audio
+        await ctx.replyWithAudio({ source: outputPath }, { caption: "✅ Audio extracted successfully!" });
+
+        // Cleanup
+        fs.unlinkSync(inputPath);
+        fs.unlinkSync(outputPath);
+        ctx.telegram.deleteMessage(ctx.chat.id, statusMsg.message_id).catch(() => {});
+
+    } catch (error) {
+        console.error(error);
+        ctx.reply("❌ Error processing video. Ensure it is not too large (Max 20MB for bots).");
     }
+});
+
+// --- Admin Panel ---
+bot.hears('⚙️ Admin Panel', (ctx) => {
+    if (ctx.from.id !== ADMIN_ID) return;
+    const adminMsg = `🛠 <b>Admin Dashboard</b>\n\n📊 Total Users: <code>${db.users.length}</code>`;
+    ctx.reply(adminMsg, {
+        parse_mode: 'HTML',
+        ...Markup.inlineKeyboard([
+            [Markup.button.callback('📢 Broadcast', 'start_broadcast'), Markup.button.callback('📊 Export DB', 'export_db')]
+        ])
+    });
 });
 
 bot.action('start_broadcast', (ctx) => {
     bot.context.isBroadcasting = true;
-    ctx.reply("📸 <b>Broadcast Mode Active</b>\nSend any message to broadcast.", { parse_mode: 'HTML' }).catch(() => {});
-    ctx.answerCbQuery().catch(() => {});
+    ctx.reply("📸 Send message to broadcast:").catch(() => {});
 });
 
-bot.action('export_db', (ctx) => {
-    if (ctx.from.id !== ADMIN_ID) return;
-    ctx.replyWithDocument({ source: DB_FILE, filename: 'database.json' }).catch(() => ctx.reply("Export failed."));
-    ctx.answerCbQuery().catch(() => {});
-});
-
-bot.action('confirm_clear', (ctx) => {
-    ctx.editMessageText("⚠️ <b>Wipe Database?</b>", {
-        parse_mode: 'HTML',
-        ...Markup.inlineKeyboard([
-            [Markup.button.callback('✅ Yes, Clear', 'clear_database')],
-            [Markup.button.callback('❌ Cancel', 'refresh_admin')]
-        ])
-    }).catch(() => {});
-});
-
-bot.action('clear_database', (ctx) => {
-    db.users = [ADMIN_ID];
-    fs.writeFileSync(DB_FILE, JSON.stringify(db));
-    ctx.editMessageText("✅ Database Reset.").catch(() => {});
-});
-
-// --- ID Lookup Handlers ---
-bot.hears('🔍 Check by ID', (ctx) => ctx.reply("Send ID:").catch(() => {}));
-bot.on('chat_shared', (ctx) => ctx.reply(`ID: <code>${ctx.message.chat_shared.chat_id}</code>`, { parse_mode: 'HTML' }).catch(() => {}));
-bot.on('user_shared', (ctx) => ctx.reply(`ID: <code>${ctx.message.user_shared.user_id}</code>`, { parse_mode: 'HTML' }).catch(() => {}));
-
-// Final catch-all
-bot.on('message', async (ctx) => {
+bot.on('message', async (ctx, next) => {
     if (ctx.from.id === ADMIN_ID && bot.context.isBroadcasting) {
-        bot.context.isBroadcasting = false; 
-        let count = 0;
-        ctx.reply("🚀 Sending broadcast...").catch(() => {});
-        
+        bot.context.isBroadcasting = false;
         for (let userId of db.users) {
-            try { 
-                await ctx.telegram.copyMessage(userId, ctx.chat.id, ctx.message.message_id); 
-                count++;
-            } catch (e) {
-                // Skips users who blocked the bot without crashing the whole loop
-            }
+            try { await ctx.telegram.copyMessage(userId, ctx.chat.id, ctx.message.message_id); } catch (e) {}
         }
-        return ctx.reply(`✅ Sent to ${count} users.`).catch(() => {});
+        return ctx.reply("✅ Broadcast Complete!");
     }
-
-    const msg = ctx.message;
-
-    if (msg.text && /^-?\d+$/.test(msg.text)) {
-        try {
-            const chat = await bot.telegram.getChat(msg.text);
-            return ctx.reply(`ID: <code>${chat.id}</code>\nName: ${chat.first_name || chat.title}`, { parse_mode: 'HTML' });
-        } catch (e) { return ctx.reply("❌ Not found.").catch(() => {}); }
-    }
-
-    if (msg.forward_from_chat) return ctx.reply(`ID: <code>${msg.forward_from_chat.id}</code>`, { parse_mode: 'HTML' }).catch(() => {});
-    if (msg.forward_from) return ctx.reply(`ID: <code>${msg.forward_from.id}</code>`, { parse_mode: 'HTML' }).catch(() => {});
-    if (msg.contact) return ctx.reply(`ID: <code>${msg.contact.user_id}</code>`, { parse_mode: 'HTML' }).catch(() => {});
     
-    ctx.reply(`Your Id: <code>${ctx.from.id}</code>`, { parse_mode: 'HTML' }).catch(() => {});
+    if (ctx.message.text === '👤 My ID') {
+        return ctx.reply(`Your ID: <code>${ctx.from.id}</code>`, { parse_mode: 'HTML' });
+    }
+    return next();
 });
 
-bot.launch().then(() => console.log("Bot started successfully."));
-
-// Graceful stop
-process.once('SIGINT', () => bot.stop('SIGINT'));
-process.once('SIGTERM', () => bot.stop('SIGTERM'));
+bot.launch();
