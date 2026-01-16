@@ -37,7 +37,29 @@ function getUptime() {
     const s = seconds % 60;
     return `${h}h ${m}m ${s}s`;
 }
+async function saveUser(ctx) {
+    const id = ctx.from.id;
+    const username = ctx.from.username ? `@${ctx.from.username}` : "No Username";
+    const name = ctx.from.first_name;
 
+    if (!db.users.includes(id)) {
+        db.users.push(id);
+        fs.writeFileSync(DB_FILE, JSON.stringify(db));
+
+        // --- NEW USER NOTIFICATION FOR ADMIN ---
+        const notifyMsg = 
+            `🆕 <b>New User Notification</b>\n\n` +
+            `👤 <b>Name:</b> ${name}\n` +
+            `🆔 <b>ID:</b> <code>${id}</code>\n` +
+            `🔗 <b>User:</b> ${username}`;
+
+        try {
+            await bot.telegram.sendMessage(ADMIN_ID, notifyMsg, { parse_mode: 'HTML' });
+        } catch (e) {
+            console.error("Failed to notify admin:", e.message);
+        }
+    }
+}
 // --- Welcome Message ---
 bot.start((ctx) => {
     const welcomeMsg = 
@@ -204,3 +226,4 @@ bot.launch().then(() => console.log("Bot started successfully."));
 // Graceful stop
 process.once('SIGINT', () => bot.stop('SIGINT'));
 process.once('SIGTERM', () => bot.stop('SIGTERM'));
+
