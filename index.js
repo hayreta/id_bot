@@ -1,14 +1,13 @@
 require('dotenv').config();
 const { Telegraf, Markup } = require('telegraf');
 const fs = require('fs');
-const os = require('os');
 
 const bot = new Telegraf(process.env.BOT_TOKEN);
 const ADMIN_ID = parseInt(process.env.ADMIN_ID);
 const DB_FILE = './database.json';
 
 // --- Database Logic ---
-if (!fs.existsSync(DB_FILE)) fs.writeFileSync(DB_FILE, JSON.stringify({ users: [], startTime: Date.now() }));
+if (!fs.existsSync(DB_FILE)) fs.writeFileSync(DB_FILE, JSON.stringify({ users: [] }));
 const db = JSON.parse(fs.readFileSync(DB_FILE));
 
 function saveUser(id) {
@@ -18,7 +17,6 @@ function saveUser(id) {
     }
 }
 
-// Track user activity
 bot.use((ctx, next) => {
     if (ctx.from) saveUser(ctx.from.id);
     return next();
@@ -34,8 +32,8 @@ bot.start((ctx) => {
         `✅ Share a contact\n` +
         `✅ Forward a story\n` +
         `✅ Reply from another chat\n\n` +
-        `📌 Simply send or share, and I'll provide the ID you need!\n\n` +
-        `Your Id: ${ctx.from.id}`;
+        `📌 Simply send or share, and I'll provide the ID you need\\!\n\n` +
+        `Your Id: \`${ctx.from.id}\``; // Clickable ID
 
     let buttons = [
         [Markup.button.userRequest('👤 User', 1), Markup.button.botRequest('🤖 Bot', 2)],
@@ -44,10 +42,10 @@ bot.start((ctx) => {
     ];
     if (ctx.from.id === ADMIN_ID) buttons.push(['⚙️ Admin Panel']);
 
-    ctx.reply(welcomeMsg, Markup.keyboard(buttons).resize());
+    ctx.replyWithMarkdownV2(welcomeMsg, Markup.keyboard(buttons).resize());
 });
 
-// --- Admin Panel ---
+// --- Admin & Broadcast ---
 bot.hears('⚙️ Admin Panel', (ctx) => {
     if (ctx.from.id !== ADMIN_ID) return;
     ctx.reply(`📊 Users: ${db.users.length}`, Markup.inlineKeyboard([
@@ -55,56 +53,54 @@ bot.hears('⚙️ Admin Panel', (ctx) => {
     ]));
 });
 
-// --- Enhanced Broadcast Logic ---
 bot.action('start_broadcast', (ctx) => {
     ctx.answerCbQuery();
-    ctx.reply("📸 Send me ANYTHING (Text, Image, or Forward a message) to broadcast it to all users:");
+    ctx.reply("📸 Send any message (Text, Image, or Forward) to broadcast:");
     bot.context.isBroadcasting = true;
 });
 
-bot.on('message', async (ctx, next) => {
-    // If not admin or not in broadcast mode, skip
-    if (ctx.from.id !== ADMIN_ID || !bot.context.isBroadcasting) return next();
-
-    bot.context.isBroadcasting = false; 
-    const users = db.users;
-    let success = 0;
-    const statusMsg = await ctx.reply(`🚀 Broadcasting to ${users.length} users...`);
-
-    for (let userId of users) {
-        try {
-            // copyMessage works for text, photo, video, and forwarded posts!
-            await ctx.telegram.copyMessage(userId, ctx.chat.id, ctx.message.message_id);
-            success++;
-        } catch (e) {
-            // User might have blocked the bot
-        }
-    }
-
-    ctx.reply(`✅ Broadcast Complete! Sent to ${success} users.`);
-});
-
-// --- ID Lookup Handlers ---
-bot.hears('🔍 Check by ID', (ctx) => ctx.reply("Send ID:"));
-bot.on('chat_shared', (ctx) => ctx.reply(`ID: ${ctx.message.chat_shared.chat_id}`));
-bot.on('user_shared', (ctx) => ctx.reply(`ID: ${ctx.message.user_shared.user_id}`));
-
-// Final catch-all for ID logic
+// --- Main Message Handler ---
 bot.on('message', async (ctx) => {
     const msg = ctx.message;
-    // Manual ID check
+
+    // Handle Broadcast
+    if (ctx.from.id === ADMIN_ID && bot.context.isBroadcasting) {
+        bot.context.isBroadcasting = false;
+        let success = 0;
+        for (let userId of db.users) {
+            try {
+                await ctx.telegram.copyMessage(userId, ctx.chat.id, msg.message_id);
+                success++;
+            } catch (e) {}
+        }
+        return ctx.reply(`✅ Broadcast Complete! Sent to ${success} users.`);
+    }
+
+    // Helper for clickable ID replies
+    const replyID = (label, id) => ctx.replyWithMarkdownV2(`${label}: \`${id}\``);
+
+    // Shared Chats
+    if (msg.chat_shared) return replyID('Target ID', msg.chat_shared.chat_id);
+    if (msg.user_shared) return replyID('Target ID', msg.user_shared.user_id);
+    
+    // Forwards & Contacts
+    if (msg.forward_from_chat) return replyID('Forwarded Chat ID', msg.forward_from_chat.id);
+    if (msg.forward_from) return replyID('Forwarded User ID', msg.forward_from.id);
+    if (msg.contact) return replyID('Contact ID', msg.contact.user_id);
+    
+    // Manual ID Search
     if (msg.text && /^-?\d+$/.test(msg.text)) {
         try {
             const chat = await bot.telegram.getChat(msg.text);
-            return ctx.reply(`ID: ${chat.id}\nName: ${chat.first_name || chat.title}`);
-        } catch (e) { return ctx.reply("Not found."); }
+            const title = chat.first_name || chat.title || 'Unknown';
+            return ctx.replyWithMarkdownV2(`🆔 ID: \`${chat.id}\`\n👤 Name: ${title}`);
+        } catch (e) { return ctx.reply("❌ Not found."); }
     }
-    // Forwards/Contacts
-    if (msg.forward_from_chat) return ctx.reply(`ID: ${msg.forward_from_chat.id}`);
-    if (msg.forward_from) return ctx.reply(`ID: ${msg.forward_from.id}`);
-    if (msg.contact) return ctx.reply(`ID: ${msg.contact.user_id}`);
+
+    if (msg.text === '🔍 Check by ID') return ctx.reply("Send the numeric ID:");
     
-    ctx.reply(`Your Id: ${ctx.from.id}`);
+    // Default reply
+    replyID('Your Id', ctx.from.id);
 });
 
 bot.launch();
