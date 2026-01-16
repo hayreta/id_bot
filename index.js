@@ -1,53 +1,71 @@
-require('dotenv').config(); // Loads variables from .env into process.env
-const { Telegraf } = require('telegraf');
+require('dotenv').config();
+const { Telegraf, Markup } = require('telegraf');
 
-// It will first look for BOT_TOKEN in your .env file or Railway settings
 const bot = new Telegraf(process.env.BOT_TOKEN);
 
+// 1. Start Command with the Keyboard shown in your image
 bot.start((ctx) => {
-    ctx.replyWithMarkdownV2(
-        "👋 *Welcome to ID Bot\\!*\n\n" +
-        "• Send a message for your *User ID*\n" +
-        "• Add me to a *Group* for the Group ID\n" +
-        "• Forward from a *Channel/Bot* for their ID"
-    );
+    const welcomeMsg = 
+        "👋 Welcome to ID Bot!\n\n" +
+        "🔹 Use this bot to get the User, Bot, Group, or Channel ID in any of these ways:\n" +
+        "✅ Forward a message\n" +
+        "✅ Share a chat using the button\n" +
+        "✅ Share a contact\n" +
+        "✅ Forward a story\n" +
+        "✅ Reply from another chat\n\n" +
+        "📌 Simply send or share, and I'll provide the ID you need!";
+
+    // Creating the 2x2 grid keyboard
+    return ctx.reply(welcomeMsg, Markup.keyboard([
+        [
+            Markup.button.userRequest('👤 User', 1),
+            Markup.button.botRequest('🤖 Bot', 2)
+        ],
+        [
+            Markup.button.groupRequest('📢 Group', 3),
+            Markup.button.channelRequest('📺 Channel', 4)
+        ]
+    ]).resize());
 });
 
+// 2. Handler for shared chats (when buttons are clicked)
+bot.on('chat_shared', (ctx) => {
+    const id = ctx.message.chat_shared.chat_id;
+    ctx.reply(`Target ID: ${id}`);
+});
+
+bot.on('user_shared', (ctx) => {
+    const id = ctx.message.user_shared.user_id;
+    ctx.reply(`Target ID: ${id}`);
+});
+
+// 3. Handler for messages, forwards, and contacts
 bot.on('message', async (ctx) => {
     const msg = ctx.message;
-    let text = "📋 *Information Found:*\n\n";
 
-    try {
-        if (msg.forward_from_chat) {
-            text += `📢 *Channel ID:* \`${msg.forward_from_chat.id}\`\n`;
-            text += `🏷 *Title:* ${msg.forward_from_chat.title}\n`;
-        } 
-        else if (msg.forward_from) {
-            const type = msg.forward_from.is_bot ? "🤖 *Bot ID:*" : "👤 *User ID:*";
-            text += `${type} \`${msg.forward_from.id}\`\n`;
-            text += `🏷 *Name:* ${msg.forward_from.first_name}\n`;
-        } 
-        else {
-            const chatType = msg.chat.type;
-            if (chatType === 'private') {
-                text += `👤 *Your User ID:* \`${msg.from.id}\`\n`;
-                text += `🏷 *Name:* ${msg.from.first_name}\n`;
-            } 
-            else if (chatType === 'group' || chatType === 'supergroup') {
-                text += `👥 *Group ID:* \`${msg.chat.id}\`\n`;
-                text += `🏷 *Group Title:* ${msg.chat.title}\n`;
-            }
-        }
+    // Handle standard message (Your ID)
+    if (!msg.forward_from && !msg.forward_from_chat && !msg.contact) {
+        return ctx.reply(`Your Id: ${msg.from.id}`);
+    }
 
-        const escapedText = text.replace(/-/g, "\\-").replace(/\./g, "\\.").replace(/!/g, "\\!");
-        await ctx.replyWithMarkdownV2(escapedText);
+    // Handle Forwarded from User/Bot
+    if (msg.forward_from) {
+        return ctx.reply(`Forwarded User/Bot Id: ${msg.forward_from.id}`);
+    }
 
-    } catch (e) {
-        console.error(e);
+    // Handle Forwarded from Channel
+    if (msg.forward_from_chat) {
+        return ctx.reply(`Forwarded Chat Id: ${msg.forward_from_chat.id}`);
+    }
+
+    // Handle Contact Share
+    if (msg.contact) {
+        return ctx.reply(`Contact User Id: ${msg.contact.user_id}`);
     }
 });
 
-bot.launch().then(() => console.log("🚀 Bot is running..."));
+bot.launch().then(() => console.log("🚀 ID Bot matches UI and is running!"));
 
+// Graceful stop
 process.once('SIGINT', () => bot.stop('SIGINT'));
 process.once('SIGTERM', () => bot.stop('SIGTERM'));
