@@ -2,6 +2,7 @@ require('dotenv').config();
 const { Telegraf, Markup } = require('telegraf');
 const fs = require('fs');
 const path = require('path');
+const https = require('https');
 const ffmpegPath = require('@ffmpeg-installer/ffmpeg').path;
 const ffmpeg = require('fluent-ffmpeg');
 ffmpeg.setFfmpegPath(ffmpegPath);
@@ -11,11 +12,11 @@ const ADMIN_ID = parseInt(process.env.ADMIN_ID);
 const DB_FILE = './database.json';
 const DOWNLOADS_DIR = './downloads';
 
-// Ensure directories exist
+// --- Initialization ---
 if (!fs.existsSync(DB_FILE)) fs.writeFileSync(DB_FILE, JSON.stringify({ users: [] }));
 if (!fs.existsSync(DOWNLOADS_DIR)) fs.mkdirSync(DOWNLOADS_DIR);
 
-const db = JSON.parse(fs.readFileSync(DB_FILE));
+let db = JSON.parse(fs.readFileSync(DB_FILE));
 
 function saveUser(id) {
     if (!db.users.includes(id)) {
@@ -24,29 +25,46 @@ function saveUser(id) {
     }
 }
 
-bot.use(async (ctx, next) => {
-    try {
-        if (ctx.from) saveUser(ctx.from.id);
-        await next();
-    } catch (err) { console.error("Bot Error:", err.message); }
+// Global error handler to prevent process exit
+bot.catch((err, ctx) => {
+    console.error(`Error for ${ctx.updateType}`, err);
 });
 
-// --- Helper: Conversion Logic ---
-async function convertVideoToAudio(inputPath, outputPath) {
+bot.use(async (ctx, next) => {
+    if (ctx.from) saveUser(ctx.from.id);
+    return next();
+});
+
+// --- Helper: Stable Downloader ---
+const downloadFile = (url, dest) => {
     return new Promise((resolve, reject) => {
-        ffmpeg(inputPath)
-            .toFormat('mp3')
-            .on('end', () => resolve())
-            .on('error', (err) => reject(err))
-            .save(outputPath);
+        const file = fs.createWriteStream(dest);
+        https.get(url, (response) => {
+            response.pipe(file);
+            file.on('finish', () => {
+                file.close();
+                resolve();
+            });
+        }).on('error', (err) => {
+            fs.unlink(dest, () => reject(err));
+        });
     });
+};
+
+// --- Helper: Format Uptime ---
+function getUptime() {
+    const seconds = Math.floor(process.uptime());
+    const h = Math.floor(seconds / 3600);
+    const m = Math.floor((seconds % 3600) / 60);
+    const s = seconds % 60;
+    return `${h}h ${m}m ${s}s`;
 }
 
 // --- Welcome Message ---
 bot.start((ctx) => {
     ctx.reply(
         `🎬 <b>Video to Audio Converter</b>\n\n` +
-        `Send me any <b>Video</b> and I will extract the audio for you as an MP3 file.\n\n` +
+        `Send me a video or forward one from a channel, and I'll send you the MP3.\n\n` +
         `Your ID: <code>${ctx.from.id}</code>`,
         { 
             parse_mode: 'HTML',
@@ -60,71 +78,94 @@ bot.start((ctx) => {
 
 // --- Video Processing ---
 bot.on(['video', 'document'], async (ctx) => {
-    const file = ctx.message.video || (ctx.message.document && ctx.message.document.mime_type.includes('video') ? ctx.message.document : null);
-    
-    if (!file) return;
+    const isDoc = !!ctx.message.document;
+    const file = isDoc ? ctx.message.document : ctx.message.video;
 
-    const statusMsg = await ctx.reply("⏳ <i>Downloading video...</i>", { parse_mode: 'HTML' });
+    // Filter for video types only
+    if (isDoc && !file.mime_type.startsWith('video/')) return;
+
+    const statusMsg = await ctx.reply("⏳ <b>Processing...</b>\nDownloading from Telegram servers...", { parse_mode: 'HTML' });
 
     try {
-        const fileLink = await ctx.telegram.getFileLink(file.file_id);
-        const inputPath = path.join(DOWNLOADS_DIR, `${file.file_id}.mp4`);
-        const outputPath = path.join(DOWNLOADS_DIR, `${file.file_id}.mp3`);
+        const fileId = file.file_id;
+        const fileLink = await ctx.telegram.getFileLink(fileId);
+        const inputPath = path.join(DOWNLOADS_DIR, `${fileId}.mp4`);
+        const outputPath = path.join(DOWNLOADS_DIR, `${fileId}.mp3`);
 
-        // Download file
-        const response = await fetch(fileLink);
-        const buffer = await response.arrayBuffer();
-        fs.writeFileSync(inputPath, Buffer.from(buffer));
-
-        await ctx.telegram.editMessageText(ctx.chat.id, statusMsg.message_id, null, "⚙️ <i>Converting to MP3...</i>", { parse_mode: 'HTML' });
+        // Download
+        await downloadFile(fileLink.href, inputPath);
+        
+        await ctx.telegram.editMessageText(ctx.chat.id, statusMsg.message_id, null, "⚙️ <b>Converting...</b>\nExtracting audio stream...", { parse_mode: 'HTML' });
 
         // Convert
-        await convertVideoToAudio(inputPath, outputPath);
-
-        // Send Audio
-        await ctx.replyWithAudio({ source: outputPath }, { caption: "✅ Audio extracted successfully!" });
-
-        // Cleanup
-        fs.unlinkSync(inputPath);
-        fs.unlinkSync(outputPath);
-        ctx.telegram.deleteMessage(ctx.chat.id, statusMsg.message_id).catch(() => {});
+        ffmpeg(inputPath)
+            .toFormat('mp3')
+            .on('error', async (err) => {
+                throw err;
+            })
+            .on('end', async () => {
+                await ctx.replyWithAudio({ source: outputPath }, { caption: "✅ Audio Extracted" });
+                // Cleanup
+                if (fs.existsSync(inputPath)) fs.unlinkSync(inputPath);
+                if (fs.existsSync(outputPath)) fs.unlinkSync(outputPath);
+                ctx.telegram.deleteMessage(ctx.chat.id, statusMsg.message_id).catch(() => {});
+            })
+            .save(outputPath);
 
     } catch (error) {
-        console.error(error);
-        ctx.reply("❌ Error processing video. Ensure it is not too large (Max 20MB for bots).");
+        console.error("Conversion Error:", error);
+        ctx.reply("❌ <b>Failed!</b>\nMake sure the file is under 20MB and is a valid video format.", { parse_mode: 'HTML' });
     }
 });
 
-// --- Admin Panel ---
+// --- Admin Dashboard ---
 bot.hears('⚙️ Admin Panel', (ctx) => {
     if (ctx.from.id !== ADMIN_ID) return;
-    const adminMsg = `🛠 <b>Admin Dashboard</b>\n\n📊 Total Users: <code>${db.users.length}</code>`;
-    ctx.reply(adminMsg, {
-        parse_mode: 'HTML',
-        ...Markup.inlineKeyboard([
-            [Markup.button.callback('📢 Broadcast', 'start_broadcast'), Markup.button.callback('📊 Export DB', 'export_db')]
-        ])
-    });
+    const usedMem = (process.memoryUsage().heapUsed / 1024 / 1024).toFixed(2);
+    ctx.reply(
+        `🛠 <b>Admin Dashboard</b>\n\n` +
+        `📊 Users: <code>${db.users.length}</code>\n` +
+        `🖥 RAM: <code>${usedMem} MB</code>\n` +
+        `🕒 Uptime: <code>${getUptime()}</code>`,
+        {
+            parse_mode: 'HTML',
+            ...Markup.inlineKeyboard([
+                [Markup.button.callback('📢 Broadcast', 'start_broadcast'), Markup.button.callback('📊 Export DB', 'export_db')],
+                [Markup.button.callback('🔄 Refresh', 'refresh_admin')]
+            ])
+        }
+    );
 });
 
 bot.action('start_broadcast', (ctx) => {
     bot.context.isBroadcasting = true;
-    ctx.reply("📸 Send message to broadcast:").catch(() => {});
+    ctx.reply("📝 <b>Ready</b>\nSend the message you want to broadcast:", { parse_mode: 'HTML' });
+    ctx.answerCbQuery();
 });
 
+// --- Final Message Handler ---
 bot.on('message', async (ctx, next) => {
     if (ctx.from.id === ADMIN_ID && bot.context.isBroadcasting) {
         bot.context.isBroadcasting = false;
+        let success = 0;
         for (let userId of db.users) {
-            try { await ctx.telegram.copyMessage(userId, ctx.chat.id, ctx.message.message_id); } catch (e) {}
+            try { 
+                await ctx.telegram.copyMessage(userId, ctx.chat.id, ctx.message.message_id); 
+                success++;
+            } catch (e) {}
         }
-        return ctx.reply("✅ Broadcast Complete!");
+        return ctx.reply(`✅ Broadcast sent to ${success} users.`);
     }
-    
+
     if (ctx.message.text === '👤 My ID') {
         return ctx.reply(`Your ID: <code>${ctx.from.id}</code>`, { parse_mode: 'HTML' });
     }
+    
+    if (ctx.message.text === '🔍 Check by ID') {
+        return ctx.reply("Send me an ID to look up:");
+    }
+
     return next();
 });
 
-bot.launch();
+bot.launch().then(() => console.log("Converter Bot Online"));
