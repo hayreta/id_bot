@@ -7,7 +7,7 @@ const bot = new Telegraf(process.env.BOT_TOKEN);
 const ADMIN_ID = parseInt(process.env.ADMIN_ID);
 const DB_FILE = './database.json';
 
-// --- Simple Database Logic ---
+// --- Database Logic ---
 if (!fs.existsSync(DB_FILE)) fs.writeFileSync(DB_FILE, JSON.stringify({ users: [], startTime: Date.now() }));
 const db = JSON.parse(fs.readFileSync(DB_FILE));
 
@@ -18,22 +18,25 @@ function saveUser(id) {
     }
 }
 
-// --- Helper: Uptime Calculator ---
-function getUptime() {
-    const uptimeSec = Math.floor((Date.now() - db.startTime) / 1000);
-    const hours = Math.floor(uptimeSec / 3600);
-    const mins = Math.floor((uptimeSec % 3600) / 60);
-    return `${hours}h ${mins}m`;
-}
-
-// Save user on every message
+// Track user activity
 bot.use((ctx, next) => {
     if (ctx.from) saveUser(ctx.from.id);
     return next();
 });
 
-// --- Start Command ---
+// --- Welcome Message ---
 bot.start((ctx) => {
+    const welcomeMsg = 
+        `👋 Welcome to ID Bot!\n\n` +
+        `🔹 Use this bot to get the User, Bot, Group, or Channel ID in any of these ways:\n` +
+        `✅ Forward a message\n` +
+        `✅ Share a chat using the button\n` +
+        `✅ Share a contact\n` +
+        `✅ Forward a story\n` +
+        `✅ Reply from another chat\n\n` +
+        `📌 Simply send or share, and I'll provide the ID you need!\n\n` +
+        `Your Id: ${ctx.from.id}`;
+
     let buttons = [
         [Markup.button.userRequest('👤 User', 1), Markup.button.botRequest('🤖 Bot', 2)],
         [Markup.button.groupRequest('📢 Group', 3), Markup.button.channelRequest('📺 Channel', 4)],
@@ -41,85 +44,67 @@ bot.start((ctx) => {
     ];
     if (ctx.from.id === ADMIN_ID) buttons.push(['⚙️ Admin Panel']);
 
-    ctx.reply("👋 Welcome to ID Bot!", Markup.keyboard(buttons).resize());
+    ctx.reply(welcomeMsg, Markup.keyboard(buttons).resize());
 });
 
 // --- Admin Panel ---
 bot.hears('⚙️ Admin Panel', (ctx) => {
     if (ctx.from.id !== ADMIN_ID) return;
-    
-    const stats = `📊 **Bot Status**\n\n` +
-                  `👥 Total Users: ${db.users.length}\n` +
-                  `⏳ Uptime: ${getUptime()}\n` +
-                  `🖥 Memory: ${(os.freemem() / 1024 / 1024 / 1024).toFixed(2)} GB Free`;
-
-    ctx.replyWithMarkdown(stats, Markup.inlineKeyboard([
-        [Markup.button.callback('📢 Start Broadcast', 'start_broadcast')],
-        [Markup.button.callback('🔄 Refresh Stats', 'refresh_stats')]
+    ctx.reply(`📊 Users: ${db.users.length}`, Markup.inlineKeyboard([
+        [Markup.button.callback('📢 Start Broadcast', 'start_broadcast')]
     ]));
 });
 
-// --- Broadcast Logic ---
+// --- Enhanced Broadcast Logic ---
 bot.action('start_broadcast', (ctx) => {
     ctx.answerCbQuery();
-    ctx.reply("📝 Send the message (text) you want to broadcast to everyone:");
+    ctx.reply("📸 Send me ANYTHING (Text, Image, or Forward a message) to broadcast it to all users:");
     bot.context.isBroadcasting = true;
 });
 
-bot.on('text', async (ctx, next) => {
+bot.on('message', async (ctx, next) => {
+    // If not admin or not in broadcast mode, skip
     if (ctx.from.id !== ADMIN_ID || !bot.context.isBroadcasting) return next();
-    
-    bot.context.isBroadcasting = false; // Reset
-    const text = ctx.message.text;
+
+    bot.context.isBroadcasting = false; 
     const users = db.users;
     let success = 0;
-    let failed = 0;
+    const statusMsg = await ctx.reply(`🚀 Broadcasting to ${users.length} users...`);
 
-    const statusMsg = await ctx.reply(`🚀 Broadcasting to ${users.length} users... (0%)`);
-
-    for (let i = 0; i < users.length; i++) {
+    for (let userId of users) {
         try {
-            await bot.telegram.sendMessage(users[i], text);
+            // copyMessage works for text, photo, video, and forwarded posts!
+            await ctx.telegram.copyMessage(userId, ctx.chat.id, ctx.message.message_id);
             success++;
         } catch (e) {
-            failed++;
-        }
-        
-        // Update status every 5 users to avoid Telegram limits
-        if (i % 5 === 0) {
-            await ctx.telegram.editMessageText(ctx.chat.id, statusMsg.message_id, null, 
-                `🚀 Broadcasting: ${Math.round((i/users.length)*100)}%\n✅ Success: ${success}\n❌ Failed: ${failed}`);
+            // User might have blocked the bot
         }
     }
 
-    ctx.reply(`✅ **Broadcast Complete**\n\nTotal: ${users.length}\nSent: ${success}\nFailed: ${failed}`);
+    ctx.reply(`✅ Broadcast Complete! Sent to ${success} users.`);
 });
 
-// --- Refresh Action ---
-bot.action('refresh_stats', (ctx) => {
-    ctx.answerCbQuery("Stats Updated!");
-    // Trigger the hears logic again
-    const stats = `📊 **Bot Status**\n\n` +
-                  `👥 Total Users: ${db.users.length}\n` +
-                  `⏳ Uptime: ${getUptime()}\n` +
-                  `🖥 Memory: ${(os.freemem() / 1024 / 1024 / 1024).toFixed(2)} GB Free`;
-    ctx.editMessageText(stats, { parse_mode: 'Markdown', ...Markup.inlineKeyboard([
-        [Markup.button.callback('📢 Start Broadcast', 'start_broadcast')],
-        [Markup.button.callback('🔄 Refresh Stats', 'refresh_stats')]
-    ])});
-});
+// --- ID Lookup Handlers ---
+bot.hears('🔍 Check by ID', (ctx) => ctx.reply("Send ID:"));
+bot.on('chat_shared', (ctx) => ctx.reply(`ID: ${ctx.message.chat_shared.chat_id}`));
+bot.on('user_shared', (ctx) => ctx.reply(`ID: ${ctx.message.user_shared.user_id}`));
 
-// Default ID Lookups
-bot.hears('🔍 Check by ID', (ctx) => ctx.reply("🔢 Send me the ID number:"));
+// Final catch-all for ID logic
 bot.on('message', async (ctx) => {
-    if (ctx.message.text && /^-?\d+$/.test(ctx.message.text)) {
+    const msg = ctx.message;
+    // Manual ID check
+    if (msg.text && /^-?\d+$/.test(msg.text)) {
         try {
-            const chat = await bot.telegram.getChat(ctx.message.text);
-            return ctx.reply(`✅ Found: ${chat.first_name} (@${chat.username || 'No User'})`);
-        } catch (e) { return ctx.reply("❌ ID not found."); }
+            const chat = await bot.telegram.getChat(msg.text);
+            return ctx.reply(`ID: ${chat.id}\nName: ${chat.first_name || chat.title}`);
+        } catch (e) { return ctx.reply("Not found."); }
     }
-    if (ctx.message.chat_shared) return ctx.reply(`ID: ${ctx.message.chat_shared.chat_id}`);
+    // Forwards/Contacts
+    if (msg.forward_from_chat) return ctx.reply(`ID: ${msg.forward_from_chat.id}`);
+    if (msg.forward_from) return ctx.reply(`ID: ${msg.forward_from.id}`);
+    if (msg.contact) return ctx.reply(`ID: ${msg.contact.user_id}`);
+    
     ctx.reply(`Your Id: ${ctx.from.id}`);
 });
 
-bot.launch().then(() => console.log("🚀 Bot is live with Admin Status Panel"));
+bot.launch();
