@@ -1,7 +1,6 @@
 require('dotenv').config();
 const { Telegraf, Markup } = require('telegraf');
 const fs = require('fs');
-const os = require('os');
 
 const bot = new Telegraf(process.env.BOT_TOKEN);
 const ADMIN_ID = parseInt(process.env.ADMIN_ID);
@@ -27,15 +26,13 @@ bot.use((ctx, next) => {
 // --- Welcome Message ---
 bot.start((ctx) => {
     const welcomeMsg = 
-        `👋 Welcome to ID Bot!\n\n` +
-        `🔹 Use this bot to get the User, Bot, Group, or Channel ID in any of these ways:\n` +
+        `👋 <b>Welcome to ID Bot!</b>\n\n` +
+        `🔹 Use this bot to get IDs in any of these ways:\n` +
         `✅ Forward a message\n` +
         `✅ Share a chat using the button\n` +
         `✅ Share a contact\n` +
-        `✅ Forward a story\n` +
-        `✅ Reply from another chat\n\n` +
-        `📌 Simply send or share, and I'll provide the ID you need!\n\n` +
-        `Your Id: \`${ctx.from.id}\``; // Monospaced
+        `✅ Forward a story\n\n` +
+        `Your Id: <code>${ctx.from.id}</code>`;
 
     let buttons = [
         [Markup.button.userRequest('👤 User', 1), Markup.button.botRequest('🤖 Bot', 2)],
@@ -44,7 +41,7 @@ bot.start((ctx) => {
     ];
     if (ctx.from.id === ADMIN_ID) buttons.push(['⚙️ Admin Panel']);
 
-    ctx.reply(welcomeMsg, { parse_mode: 'MarkdownV2', ...Markup.keyboard(buttons).resize() });
+    ctx.reply(welcomeMsg, { parse_mode: 'HTML', ...Markup.keyboard(buttons).resize() });
 });
 
 // --- Admin Panel ---
@@ -55,53 +52,42 @@ bot.hears('⚙️ Admin Panel', (ctx) => {
     ]));
 });
 
-// --- Enhanced Broadcast Logic ---
+// --- Broadcast Logic ---
 bot.action('start_broadcast', (ctx) => {
     ctx.answerCbQuery();
-    ctx.reply("📸 Send me ANYTHING (Text, Image, or Forward a message) to broadcast it to all users:");
+    ctx.reply("📸 Send anything to broadcast:");
     bot.context.isBroadcasting = true;
-});
-
-bot.on('message', async (ctx, next) => {
-    if (ctx.from.id !== ADMIN_ID || !bot.context.isBroadcasting) return next();
-
-    bot.context.isBroadcasting = false; 
-    const users = db.users;
-    let success = 0;
-    const statusMsg = await ctx.reply(`🚀 Broadcasting to ${users.length} users...`);
-
-    for (let userId of users) {
-        try {
-            await ctx.telegram.copyMessage(userId, ctx.chat.id, ctx.message.message_id);
-            success++;
-        } catch (e) { }
-    }
-    ctx.reply(`✅ Broadcast Complete! Sent to ${success} users.`);
 });
 
 // --- ID Lookup Handlers ---
 bot.hears('🔍 Check by ID', (ctx) => ctx.reply("Send ID:"));
-bot.on('chat_shared', (ctx) => ctx.reply(`ID: \`${ctx.message.chat_shared.chat_id}\``, { parse_mode: 'MarkdownV2' }));
-bot.on('user_shared', (ctx) => ctx.reply(`ID: \`${ctx.message.user_shared.user_id}\``, { parse_mode: 'MarkdownV2' }));
+bot.on('chat_shared', (ctx) => ctx.reply(`ID: <code>${ctx.message.chat_shared.chat_id}</code>`, { parse_mode: 'HTML' }));
+bot.on('user_shared', (ctx) => ctx.reply(`ID: <code>${ctx.message.user_shared.user_id}</code>`, { parse_mode: 'HTML' }));
 
 // Final catch-all for ID logic
-bot.on('message', async (ctx) => {
+bot.on('message', async (ctx, next) => {
+    if (ctx.from.id === ADMIN_ID && bot.context.isBroadcasting) {
+        bot.context.isBroadcasting = false; 
+        for (let userId of db.users) {
+            try { await ctx.telegram.copyMessage(userId, ctx.chat.id, ctx.message.message_id); } catch (e) {}
+        }
+        return ctx.reply("✅ Broadcast Complete!");
+    }
+
     const msg = ctx.message;
 
-    // Manual ID check
     if (msg.text && /^-?\d+$/.test(msg.text)) {
         try {
             const chat = await bot.telegram.getChat(msg.text);
-            return ctx.reply(`ID: \`${chat.id}\`\nName: ${chat.first_name || chat.title}`, { parse_mode: 'MarkdownV2' });
+            return ctx.reply(`ID: <code>${chat.id}</code>\nName: ${chat.first_name || chat.title}`, { parse_mode: 'HTML' });
         } catch (e) { return ctx.reply("Not found."); }
     }
 
-    // Forwards/Contacts
-    if (msg.forward_from_chat) return ctx.reply(`ID: \`${msg.forward_from_chat.id}\``, { parse_mode: 'MarkdownV2' });
-    if (msg.forward_from) return ctx.reply(`ID: \`${msg.forward_from.id}\``, { parse_mode: 'MarkdownV2' });
-    if (msg.contact) return ctx.reply(`ID: \`${msg.contact.user_id}\``, { parse_mode: 'MarkdownV2' });
+    if (msg.forward_from_chat) return ctx.reply(`ID: <code>${msg.forward_from_chat.id}</code>`, { parse_mode: 'HTML' });
+    if (msg.forward_from) return ctx.reply(`ID: <code>${msg.forward_from.id}</code>`, { parse_mode: 'HTML' });
+    if (msg.contact) return ctx.reply(`ID: <code>${msg.contact.user_id}</code>`, { parse_mode: 'HTML' });
     
-    ctx.reply(`Your Id: \`${ctx.from.id}\``, { parse_mode: 'MarkdownV2' });
+    ctx.reply(`Your Id: <code>${ctx.from.id}</code>`, { parse_mode: 'HTML' });
 });
 
 bot.launch();
