@@ -12,35 +12,15 @@ if (!fs.existsSync(DB_FILE)) {
 }
 let db = JSON.parse(fs.readFileSync(DB_FILE));
 
-function saveUser(id) {
-    if (!db.users.includes(id)) {
-        db.users.push(id);
-        fs.writeFileSync(DB_FILE, JSON.stringify(db));
-    }
-}
-
-// Track user activity
-bot.use(async (ctx, next) => {
-    try {
-        if (ctx.from) saveUser(ctx.from.id);
-        await next();
-    } catch (err) {
-        console.error("Caught error:", err.message);
-    }
-});
-
-// --- Helper: Format Uptime ---
-function getUptime() {
-    const seconds = Math.floor(process.uptime());
-    const h = Math.floor(seconds / 3600);
-    const m = Math.floor((seconds % 3600) / 60);
-    const s = seconds % 60;
-    return `${h}h ${m}m ${s}s`;
-}
+/**
+ * Saves user to DB and notifies Admin if it's a new user
+ */
 async function saveUser(ctx) {
+    if (!ctx.from) return;
+    
     const id = ctx.from.id;
     const username = ctx.from.username ? `@${ctx.from.username}` : "No Username";
-    const name = ctx.from.first_name;
+    const name = ctx.from.first_name || "Unknown";
 
     if (!db.users.includes(id)) {
         db.users.push(id);
@@ -60,6 +40,26 @@ async function saveUser(ctx) {
         }
     }
 }
+
+// Track user activity via Middleware
+bot.use(async (ctx, next) => {
+    try {
+        await saveUser(ctx);
+        await next();
+    } catch (err) {
+        console.error("Caught error:", err.message);
+    }
+});
+
+// --- Helper: Format Uptime ---
+function getUptime() {
+    const seconds = Math.floor(process.uptime());
+    const h = Math.floor(seconds / 3600);
+    const m = Math.floor((seconds % 3600) / 60);
+    const s = seconds % 60;
+    return `${h}h ${m}m ${s}s`;
+}
+
 // --- Welcome Message ---
 bot.start((ctx) => {
     const welcomeMsg = 
@@ -189,7 +189,6 @@ bot.on('message', async (ctx) => {
             try { 
                 await ctx.telegram.copyMessage(userId, ctx.chat.id, ctx.message.message_id); 
                 count++;
-                // Small delay to prevent flood limits
                 await new Promise(resolve => setTimeout(resolve, 50)); 
             } catch (e) {
                 // User blocked bot
@@ -223,7 +222,5 @@ bot.on('message', async (ctx) => {
 
 bot.launch().then(() => console.log("Bot started successfully."));
 
-// Graceful stop
 process.once('SIGINT', () => bot.stop('SIGINT'));
 process.once('SIGTERM', () => bot.stop('SIGTERM'));
-
