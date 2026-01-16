@@ -7,7 +7,9 @@ const ADMIN_ID = parseInt(process.env.ADMIN_ID);
 const DB_FILE = './database.json';
 
 // --- Database Logic ---
-if (!fs.existsSync(DB_FILE)) fs.writeFileSync(DB_FILE, JSON.stringify({ users: [], startTime: Date.now() }));
+if (!fs.existsSync(DB_FILE)) {
+    fs.writeFileSync(DB_FILE, JSON.stringify({ users: [], startTime: Date.now() }));
+}
 let db = JSON.parse(fs.readFileSync(DB_FILE));
 
 function saveUser(id) {
@@ -17,7 +19,7 @@ function saveUser(id) {
     }
 }
 
-// Track user activity - FIXED with global catch
+// Track user activity
 bot.use(async (ctx, next) => {
     try {
         if (ctx.from) saveUser(ctx.from.id);
@@ -53,10 +55,13 @@ bot.start((ctx) => {
     ];
     if (ctx.from.id === ADMIN_ID) buttons.push(['⚙️ Admin Panel']);
 
-    ctx.reply(welcomeMsg, { parse_mode: 'HTML', ...Markup.keyboard(buttons).resize() }).catch(e => console.log(e.message));
+    ctx.reply(welcomeMsg, { 
+        parse_mode: 'HTML', 
+        ...Markup.keyboard(buttons).resize() 
+    }).catch(e => console.log(e.message));
 });
 
-// --- Admin Panel Main ---
+// --- Admin Panel ---
 bot.hears('⚙️ Admin Panel', (ctx) => {
     if (ctx.from.id !== ADMIN_ID) return;
 
@@ -127,13 +132,32 @@ bot.action('clear_database', (ctx) => {
     ctx.editMessageText("✅ Database Reset.").catch(() => {});
 });
 
-// --- ID Lookup Handlers ---
-bot.hears('🔍 Check by ID', (ctx) => ctx.reply("Send ID:").catch(() => {}));
-bot.on('chat_shared', (ctx) => ctx.reply(`ID: <code>${ctx.message.chat_shared.chat_id}</code>`, { parse_mode: 'HTML' }).catch(() => {}));
-bot.on('user_shared', (ctx) => ctx.reply(`ID: <code>${ctx.message.user_shared.user_id}</code>`, { parse_mode: 'HTML' }).catch(() => {}));
+// --- ID Lookup Handlers (Shared Buttons) ---
+bot.on('chat_shared', (ctx) => {
+    const chatId = ctx.message.chat_shared.chat_id;
+    ctx.reply(`✅ <b>Chat ID:</b> <code>${chatId}</code>`, {
+        parse_mode: 'HTML',
+        ...Markup.inlineKeyboard([[Markup.button.callback('📋 Copy ID', 'copy_hint')]])
+    }).catch(() => {});
+});
 
-// Final catch-all
+bot.on('user_shared', (ctx) => {
+    const userId = ctx.message.user_shared.user_id;
+    ctx.reply(`✅ <b>User ID:</b> <code>${userId}</code>`, {
+        parse_mode: 'HTML',
+        ...Markup.inlineKeyboard([[Markup.button.callback('📋 Copy ID', 'copy_hint')]])
+    }).catch(() => {});
+});
+
+bot.action('copy_hint', (ctx) => {
+    ctx.answerCbQuery("Tap the ID number above to copy it!", { show_alert: false });
+});
+
+bot.hears('🔍 Check by ID', (ctx) => ctx.reply("Send an ID to check its details:").catch(() => {}));
+
+// --- Main Message Handler ---
 bot.on('message', async (ctx) => {
+    // Admin Broadcast Logic
     if (ctx.from.id === ADMIN_ID && bot.context.isBroadcasting) {
         bot.context.isBroadcasting = false; 
         let count = 0;
@@ -143,8 +167,10 @@ bot.on('message', async (ctx) => {
             try { 
                 await ctx.telegram.copyMessage(userId, ctx.chat.id, ctx.message.message_id); 
                 count++;
+                // Small delay to prevent flood limits
+                await new Promise(resolve => setTimeout(resolve, 50)); 
             } catch (e) {
-                // Skips users who blocked the bot without crashing the whole loop
+                // User blocked bot
             }
         }
         return ctx.reply(`✅ Sent to ${count} users.`).catch(() => {});
@@ -152,17 +178,24 @@ bot.on('message', async (ctx) => {
 
     const msg = ctx.message;
 
+    // Check if user sent a raw ID number
     if (msg.text && /^-?\d+$/.test(msg.text)) {
         try {
             const chat = await bot.telegram.getChat(msg.text);
-            return ctx.reply(`ID: <code>${chat.id}</code>\nName: ${chat.first_name || chat.title}`, { parse_mode: 'HTML' });
-        } catch (e) { return ctx.reply("❌ Not found.").catch(() => {}); }
+            return ctx.reply(`✅ <b>Details Found:</b>\n\n<b>ID:</b> <code>${chat.id}</code>\n<b>Name:</b> ${chat.first_name || chat.title}`, { parse_mode: 'HTML' });
+        } catch (e) { 
+            return ctx.reply("❌ Chat/User not found or bot has no access.").catch(() => {}); 
+        }
     }
 
-    if (msg.forward_from_chat) return ctx.reply(`ID: <code>${msg.forward_from_chat.id}</code>`, { parse_mode: 'HTML' }).catch(() => {});
-    if (msg.forward_from) return ctx.reply(`ID: <code>${msg.forward_from.id}</code>`, { parse_mode: 'HTML' }).catch(() => {});
-    if (msg.contact) return ctx.reply(`ID: <code>${msg.contact.user_id}</code>`, { parse_mode: 'HTML' }).catch(() => {});
+    // Forwarded Messages
+    if (msg.forward_from_chat) return ctx.reply(`✅ <b>Forwarded Chat ID:</b> <code>${msg.forward_from_chat.id}</code>`, { parse_mode: 'HTML' }).catch(() => {});
+    if (msg.forward_from) return ctx.reply(`✅ <b>Forwarded User ID:</b> <code>${msg.forward_from.id}</code>`, { parse_mode: 'HTML' }).catch(() => {});
     
+    // Shared Contacts
+    if (msg.contact) return ctx.reply(`✅ <b>Contact User ID:</b> <code>${msg.contact.user_id}</code>`, { parse_mode: 'HTML' }).catch(() => {});
+    
+    // Default reply (User's own ID)
     ctx.reply(`Your Id: <code>${ctx.from.id}</code>`, { parse_mode: 'HTML' }).catch(() => {});
 });
 
