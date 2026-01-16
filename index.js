@@ -3,69 +3,59 @@ const { Telegraf, Markup } = require('telegraf');
 
 const bot = new Telegraf(process.env.BOT_TOKEN);
 
-// 1. Start Command with the Keyboard shown in your image
+// 1. Start Command with updated 3-row keyboard
 bot.start((ctx) => {
     const welcomeMsg = 
         "👋 Welcome to ID Bot!\n\n" +
-        "🔹 Use this bot to get the User, Bot, Group, or Channel ID in any of these ways:\n" +
-        "✅ Forward a message\n" +
-        "✅ Share a chat using the button\n" +
-        "✅ Share a contact\n" +
-        "✅ Forward a story\n" +
-        "✅ Reply from another chat\n\n" +
-        "📌 Simply send or share, and I'll provide the ID you need!";
+        "🔹 Use the buttons below or send/forward a message to get IDs.\n" +
+        "🔍 To check a user, click '🔍 Check ID' then send me the ID number.";
 
-    // Creating the 2x2 grid keyboard
     return ctx.reply(welcomeMsg, Markup.keyboard([
-        [
-            Markup.button.userRequest('👤 User', 1),
-            Markup.button.botRequest('🤖 Bot', 2)
-        ],
-        [
-            Markup.button.groupRequest('📢 Group', 3),
-            Markup.button.channelRequest('📺 Channel', 4)
-        ]
+        [Markup.button.userRequest('👤 User', 1), Markup.button.botRequest('🤖 Bot', 2)],
+        [Markup.button.groupRequest('📢 Group', 3), Markup.button.channelRequest('📺 Channel', 4)],
+        ['🔍 Check by ID'] // New button
     ]).resize());
 });
 
-// 2. Handler for shared chats (when buttons are clicked)
-bot.on('chat_shared', (ctx) => {
-    const id = ctx.message.chat_shared.chat_id;
-    ctx.reply(`Target ID: ${id}`);
+// 2. Handle the "Check by ID" button click
+bot.hears('🔍 Check by ID', (ctx) => {
+    ctx.reply("🔢 Please send me the **Telegram ID** you want to check:");
 });
 
-bot.on('user_shared', (ctx) => {
-    const id = ctx.message.user_shared.user_id;
-    ctx.reply(`Target ID: ${id}`);
-});
-
-// 3. Handler for messages, forwards, and contacts
+// 3. Main Message & ID Lookup Handler
 bot.on('message', async (ctx) => {
     const msg = ctx.message;
 
-    // Handle standard message (Your ID)
-    if (!msg.forward_from && !msg.forward_from_chat && !msg.contact) {
+    // Check if the user sent a numeric ID (e.g., "5522724001")
+    if (msg.text && /^-?\d+$/.test(msg.text)) {
+        const searchId = msg.text;
+        try {
+            // Retrieve extended chat/user info
+            const chat = await bot.telegram.getChat(searchId);
+            
+            let response = "✅ **User Information Found:**\n\n";
+            response += `🆔 **ID:** \`${chat.id}\`\n`;
+            response += `👤 **Name:** ${chat.first_name || ''} ${chat.last_name || ''}\n`;
+            response += `🏷 **Username:** ${chat.username ? '@' + chat.username : 'None'}\n`;
+            response += `📝 **Bio:** ${chat.bio || 'No bio available'}\n`;
+
+            return ctx.replyWithMarkdown(response);
+        } catch (error) {
+            return ctx.reply("❌ **Error:** I cannot find this ID. The user must message me first or we must share a group.");
+        }
+    }
+
+    // --- Standard ID Handlers (From previous version) ---
+    if (msg.chat_shared) return ctx.reply(`Target ID: ${msg.chat_shared.chat_id}`);
+    if (msg.user_shared) return ctx.reply(`Target ID: ${msg.user_shared.user_id}`);
+    
+    // Default reply for your own ID
+    if (!msg.forward_from && !msg.forward_from_chat) {
         return ctx.reply(`Your Id: ${msg.from.id}`);
-    }
-
-    // Handle Forwarded from User/Bot
-    if (msg.forward_from) {
-        return ctx.reply(`Forwarded User/Bot Id: ${msg.forward_from.id}`);
-    }
-
-    // Handle Forwarded from Channel
-    if (msg.forward_from_chat) {
-        return ctx.reply(`Forwarded Chat Id: ${msg.forward_from_chat.id}`);
-    }
-
-    // Handle Contact Share
-    if (msg.contact) {
-        return ctx.reply(`Contact User Id: ${msg.contact.user_id}`);
     }
 });
 
-bot.launch().then(() => console.log("🚀 ID Bot matches UI and is running!"));
+bot.launch().then(() => console.log("🚀 ID Bot with Lookup is running!"));
 
-// Graceful stop
 process.once('SIGINT', () => bot.stop('SIGINT'));
 process.once('SIGTERM', () => bot.stop('SIGTERM'));
