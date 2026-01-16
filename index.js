@@ -1,22 +1,13 @@
 require('dotenv').config();
 const { Telegraf, Markup } = require('telegraf');
 const fs = require('fs');
-const path = require('path');
-const https = require('https');
-const ffmpegPath = require('@ffmpeg-installer/ffmpeg').path;
-const ffmpeg = require('fluent-ffmpeg');
-
-ffmpeg.setFfmpegPath(ffmpegPath);
 
 const bot = new Telegraf(process.env.BOT_TOKEN);
 const ADMIN_ID = parseInt(process.env.ADMIN_ID);
 const DB_FILE = './database.json';
-const TEMP_DIR = './downloads';
 
-// --- Startup Check ---
-if (!fs.existsSync(DB_FILE)) fs.writeFileSync(DB_FILE, JSON.stringify({ users: [] }));
-if (!fs.existsSync(TEMP_DIR)) fs.mkdirSync(TEMP_DIR);
-
+// --- Database Logic ---
+if (!fs.existsSync(DB_FILE)) fs.writeFileSync(DB_FILE, JSON.stringify({ users: [], startTime: Date.now() }));
 let db = JSON.parse(fs.readFileSync(DB_FILE));
 
 function saveUser(id) {
@@ -26,118 +17,157 @@ function saveUser(id) {
     }
 }
 
-// CRITICAL: Prevent crash on any unhandled error
-bot.catch((err, ctx) => {
-    console.error(`Error for ${ctx.updateType}:`, err.message);
-});
-
+// Track user activity - FIXED with global catch
 bot.use(async (ctx, next) => {
-    if (ctx.from) saveUser(ctx.from.id);
-    return next();
-});
-
-// --- Stable Download Stream ---
-const downloadFile = (url, dest) => {
-    return new Promise((resolve, reject) => {
-        const file = fs.createWriteStream(dest);
-        https.get(url, (res) => {
-            if (res.statusCode !== 200) reject(new Error('Download Failed'));
-            res.pipe(file);
-            file.on('finish', () => { file.close(); resolve(); });
-        }).on('error', (err) => { 
-            if (fs.existsSync(dest)) fs.unlinkSync(dest);
-            reject(err); 
-        });
-    });
-};
-
-// --- Bot Start ---
-bot.start((ctx) => {
-    let menu = (ctx.from.id === ADMIN_ID) ? Markup.keyboard([['⚙️ Admin Panel']]).resize() : { remove_keyboard: true };
-    ctx.reply(
-        `🎬 <b>Video to Audio Converter</b>\n\n` +
-        `Send me any video (Max 20MB) and I will extract the MP3 for you.\n\n` +
-        `Your ID: <code>${ctx.from.id}</code>`,
-        { parse_mode: 'HTML', ...menu }
-    ).catch(() => {});
-});
-
-// --- Core Conversion Logic ---
-bot.on(['video', 'document'], async (ctx) => {
-    const msg = ctx.message;
-    const file = msg.video || (msg.document && msg.document.mime_type.startsWith('video/') ? msg.document : null);
-
-    if (!file) return;
-
-    // 🛑 Size Check (Telegram Bot API limit is 20MB)
-    if (file.file_size > 20 * 1024 * 1024) {
-        return ctx.reply("❌ <b>File too large!</b>\nTelegram only allows bots to download files under 20MB.", { parse_mode: 'HTML' });
-    }
-
-    const status = await ctx.reply("⏳ <b>Downloading...</b>", { parse_mode: 'HTML' });
-
     try {
-        const link = await ctx.telegram.getFileLink(file.file_id);
-        const iPath = path.join(TEMP_DIR, `in_${file.file_id}.mp4`);
-        const oPath = path.join(TEMP_DIR, `out_${file.file_id}.mp3`);
-
-        await downloadFile(link.href, iPath);
-        await ctx.telegram.editMessageText(ctx.chat.id, status.message_id, null, "⚙️ <b>Converting...</b>", { parse_mode: 'HTML' });
-
-        ffmpeg(iPath)
-            .toFormat('mp3')
-            .on('error', (err) => { throw err; })
-            .on('end', async () => {
-                await ctx.replyWithAudio({ source: oPath }, { caption: "✅ <b>Audio Extracted</b>", parse_mode: 'HTML' });
-                // Clean up
-                if (fs.existsSync(iPath)) fs.unlinkSync(iPath);
-                if (fs.existsSync(oPath)) fs.unlinkSync(oPath);
-                ctx.deleteMessage(status.message_id).catch(() => {});
-            })
-            .save(oPath);
-
-    } catch (e) {
-        console.error("Task Error:", e.message);
-        ctx.reply("❌ <b>Conversion Failed</b>\nPlease try a different video format.", { parse_mode: 'HTML' });
+        if (ctx.from) saveUser(ctx.from.id);
+        await next();
+    } catch (err) {
+        console.error("Caught error:", err.message);
     }
 });
 
-// --- Admin Features ---
+// --- Helper: Format Uptime ---
+function getUptime() {
+    const seconds = Math.floor(process.uptime());
+    const h = Math.floor(seconds / 3600);
+    const m = Math.floor((seconds % 3600) / 60);
+    const s = seconds % 60;
+    return `${h}h ${m}m ${s}s`;
+}
+
+// --- Welcome Message ---
+bot.start((ctx) => {
+    const welcomeMsg = 
+        `👋 <b>Welcome to ID Bot!</b>\n\n` +
+        `🔹 Use this bot to get IDs in any of these ways:\n` +
+        `✅ Forward a message\n` +
+        `✅ Share a chat using the button\n` +
+        `✅ Share a contact\n\n` +
+        `Your Id: <code>${ctx.from.id}</code>`;
+
+    let buttons = [
+        [Markup.button.userRequest('👤 User', 1), Markup.button.botRequest('🤖 Bot', 2)],
+        [Markup.button.groupRequest('📢 Group', 3), Markup.button.channelRequest('📺 Channel', 4)],
+        ['🔍 Check by ID']
+    ];
+    if (ctx.from.id === ADMIN_ID) buttons.push(['⚙️ Admin Panel']);
+
+    ctx.reply(welcomeMsg, { parse_mode: 'HTML', ...Markup.keyboard(buttons).resize() }).catch(e => console.log(e.message));
+});
+
+// --- Admin Panel Main ---
 bot.hears('⚙️ Admin Panel', (ctx) => {
     if (ctx.from.id !== ADMIN_ID) return;
-    ctx.reply(`📊 <b>Admin Dashboard</b>\n\nTotal Users: <code>${db.users.length}</code>`, {
-        parse_mode: 'HTML',
-        ...Markup.inlineKeyboard([
-            [Markup.button.callback('📢 Broadcast', 'start_bc'), Markup.button.callback('📊 Export DB', 'export_db')]
-        ])
-    });
+
+    const totalUsers = db.users.length;
+    const usedMem = (process.memoryUsage().heapUsed / 1024 / 1024).toFixed(2);
+    
+    const adminMsg = 
+        `🛠 <b>Advanced Admin Dashboard</b>\n\n` +
+        `📊 <b>User Statistics</b>\n` +
+        `├ Total Users: <code>${totalUsers}</code>\n` +
+        `└ Status: 🟢 Online\n\n` +
+        `🖥 <b>Server Status</b>\n` +
+        `├ Uptime: <code>${getUptime()}</code>\n` +
+        `└ RAM Usage: <code>${usedMem} MB</code>`;
+
+    const adminButtons = Markup.inlineKeyboard([
+        [Markup.button.callback('📢 Broadcast', 'start_broadcast'), Markup.button.callback('📊 Export DB', 'export_db')],
+        [Markup.button.callback('🔄 Refresh Stats', 'refresh_admin'), Markup.button.callback('🗑 Clear DB', 'confirm_clear')]
+    ]);
+
+    ctx.reply(adminMsg, { parse_mode: 'HTML', ...adminButtons }).catch(e => console.log(e.message));
 });
 
-bot.action('start_bc', (ctx) => {
-    bot.context.bcActive = true;
-    ctx.reply("✍️ <b>Send the message to broadcast:</b>", { parse_mode: 'HTML' });
-    ctx.answerCbQuery();
+// --- Admin Actions ---
+bot.action('refresh_admin', async (ctx) => {
+    const totalUsers = db.users.length;
+    const usedMem = (process.memoryUsage().heapUsed / 1024 / 1024).toFixed(2);
+    const adminMsg = `🛠 <b>Advanced Admin Dashboard</b>\n\n📊 <b>User Statistics</b>\n├ Total Users: <code>${totalUsers}</code>\n└ Status: 🟢 Online\n\n🖥 <b>Server Status</b>\n├ Uptime: <code>${getUptime()}</code>\n└ RAM Usage: <code>${usedMem} MB</code>`;
+
+    try {
+        await ctx.editMessageText(adminMsg, { 
+            parse_mode: 'HTML', 
+            ...Markup.inlineKeyboard([
+                [Markup.button.callback('📢 Broadcast', 'start_broadcast'), Markup.button.callback('📊 Export DB', 'export_db')],
+                [Markup.button.callback('🔄 Refresh Stats', 'refresh_admin'), Markup.button.callback('🗑 Clear DB', 'confirm_clear')]
+            ])
+        });
+    } catch (e) { 
+        ctx.answerCbQuery("Stats Updated!").catch(() => {}); 
+    }
+});
+
+bot.action('start_broadcast', (ctx) => {
+    bot.context.isBroadcasting = true;
+    ctx.reply("📸 <b>Broadcast Mode Active</b>\nSend any message to broadcast.", { parse_mode: 'HTML' }).catch(() => {});
+    ctx.answerCbQuery().catch(() => {});
 });
 
 bot.action('export_db', (ctx) => {
-    ctx.replyWithDocument({ source: DB_FILE }).catch(() => {});
-    ctx.answerCbQuery();
+    if (ctx.from.id !== ADMIN_ID) return;
+    ctx.replyWithDocument({ source: DB_FILE, filename: 'database.json' }).catch(() => ctx.reply("Export failed."));
+    ctx.answerCbQuery().catch(() => {});
 });
 
+bot.action('confirm_clear', (ctx) => {
+    ctx.editMessageText("⚠️ <b>Wipe Database?</b>", {
+        parse_mode: 'HTML',
+        ...Markup.inlineKeyboard([
+            [Markup.button.callback('✅ Yes, Clear', 'clear_database')],
+            [Markup.button.callback('❌ Cancel', 'refresh_admin')]
+        ])
+    }).catch(() => {});
+});
+
+bot.action('clear_database', (ctx) => {
+    db.users = [ADMIN_ID];
+    fs.writeFileSync(DB_FILE, JSON.stringify(db));
+    ctx.editMessageText("✅ Database Reset.").catch(() => {});
+});
+
+// --- ID Lookup Handlers ---
+bot.hears('🔍 Check by ID', (ctx) => ctx.reply("Send ID:").catch(() => {}));
+bot.on('chat_shared', (ctx) => ctx.reply(`ID: <code>${ctx.message.chat_shared.chat_id}</code>`, { parse_mode: 'HTML' }).catch(() => {}));
+bot.on('user_shared', (ctx) => ctx.reply(`ID: <code>${ctx.message.user_shared.user_id}</code>`, { parse_mode: 'HTML' }).catch(() => {}));
+
+// Final catch-all
 bot.on('message', async (ctx) => {
-    if (ctx.from.id === ADMIN_ID && bot.context.bcActive) {
-        bot.context.bcActive = false;
+    if (ctx.from.id === ADMIN_ID && bot.context.isBroadcasting) {
+        bot.context.isBroadcasting = false; 
         let count = 0;
-        ctx.reply("🚀 <b>Broadcasting...</b>", { parse_mode: 'HTML' });
-
-        for (const uid of db.users) {
-            try {
-                await ctx.telegram.copyMessage(uid, ctx.chat.id, ctx.message.message_id);
+        ctx.reply("🚀 Sending broadcast...").catch(() => {});
+        
+        for (let userId of db.users) {
+            try { 
+                await ctx.telegram.copyMessage(userId, ctx.chat.id, ctx.message.message_id); 
                 count++;
-            } catch (e) {}
+            } catch (e) {
+                // Skips users who blocked the bot without crashing the whole loop
+            }
         }
-        return ctx.reply(`✅ Sent to <code>${count}</code> users.`, { parse_mode: 'HTML' });
+        return ctx.reply(`✅ Sent to ${count} users.`).catch(() => {});
     }
+
+    const msg = ctx.message;
+
+    if (msg.text && /^-?\d+$/.test(msg.text)) {
+        try {
+            const chat = await bot.telegram.getChat(msg.text);
+            return ctx.reply(`ID: <code>${chat.id}</code>\nName: ${chat.first_name || chat.title}`, { parse_mode: 'HTML' });
+        } catch (e) { return ctx.reply("❌ Not found.").catch(() => {}); }
+    }
+
+    if (msg.forward_from_chat) return ctx.reply(`ID: <code>${msg.forward_from_chat.id}</code>`, { parse_mode: 'HTML' }).catch(() => {});
+    if (msg.forward_from) return ctx.reply(`ID: <code>${msg.forward_from.id}</code>`, { parse_mode: 'HTML' }).catch(() => {});
+    if (msg.contact) return ctx.reply(`ID: <code>${msg.contact.user_id}</code>`, { parse_mode: 'HTML' }).catch(() => {});
+    
+    ctx.reply(`Your Id: <code>${ctx.from.id}</code>`, { parse_mode: 'HTML' }).catch(() => {});
 });
 
-bot.launch().then(() => console.log("Converter Bot Online and Protected."));
+bot.launch().then(() => console.log("Bot started successfully."));
+
+// Graceful stop
+process.once('SIGINT', () => bot.stop('SIGINT'));
+process.once('SIGTERM', () => bot.stop('SIGTERM'));
